@@ -5,6 +5,10 @@ import plotly.express as px
 
 # Read CSV
 df = pd.read_csv('data.csv')
+# Load wafer bow data
+df_bow = pd.read_csv('data-wafer-bow.csv')
+## PRODUCT_DESCRIPTION filter removed
+df['LOT7'] = df['LOT'].astype(str).str[:7]
 
 # --- Merge Lot-good-bad.csv columns ---
 lot_good_bad = pd.read_csv('Lot-good-bad.csv')
@@ -27,10 +31,17 @@ for opn_val in df['OPN'].unique():
         desc = df[df['OPN'].apply(format_opn) == opn_str]['OPER_SHORT_DESC'].iloc[0] if 'OPER_SHORT_DESC' in df.columns else ''
         opn_desc_map[opn_str] = f"{opn_str} - {desc}" if desc else opn_str
 unique_opns = sorted(opn_desc_map.keys())
-opn_dfs = {opn: df[df['OPN'].apply(format_opn) == opn].copy() for opn in unique_opns}
+opn_dfs = {}
+for opn in unique_opns:
+    df_opn = df[df['OPN'].apply(format_opn) == opn].copy()
+    # For each LOT, keep only the row with the most recent LAST_WAFER_END_DATE
+    if 'LAST_WAFER_END_DATE' in df_opn.columns:
+        df_opn['LAST_WAFER_END_DATE'] = pd.to_datetime(df_opn['LAST_WAFER_END_DATE'])
+        df_opn = df_opn.sort_values('LAST_WAFER_END_DATE').drop_duplicates(subset=['LOT'], keep='last')
+    opn_dfs[opn] = df_opn
 
 # Calculate DELAY_TIME and add ENTITY for matching LOTs
-def calculate_delay_time(start_opn, end_opn):
+def calculate_delay_time(start_opn, end_opn, lot_col='LOT'):
     df_start = opn_dfs[start_opn]
     df_end = opn_dfs[end_opn]
     delay_times = []
@@ -38,20 +49,26 @@ def calculate_delay_time(start_opn, end_opn):
     multi_counts = []
     split_values = []
     for idx, row in df_start.iterrows():
-        lot = row['LOT']
-        lot_rows = df_end[df_end['LOT'] == lot]
+        lot_val = row[lot_col]
+        lot_rows = df_end[df_end[lot_col] == lot_val]
         multi_count = len(lot_rows)
         if multi_count > 0:
             lot_rows = lot_rows.copy()
             lot_rows['LAST_WAFER_END_DATE'] = pd.to_datetime(lot_rows['LAST_WAFER_END_DATE'])
-            most_recent_row = lot_rows.loc[lot_rows['LAST_WAFER_END_DATE'].idxmax()]
-            end_start = pd.to_datetime(row['LAST_WAFER_END_DATE'])
-            end_end = most_recent_row['LAST_WAFER_END_DATE']
-            delay = round((end_end - end_start).total_seconds() / 3600, 1)
-            entity = most_recent_row['ENTITY']
-            qty_start = row['QTY']
-            qty_end = most_recent_row['QTY']
-            split = 'YES' if qty_start != qty_end else 'NO'
+            valid_dates = lot_rows['LAST_WAFER_END_DATE'].notna()
+            if not lot_rows.empty and valid_dates.any():
+                most_recent_row = lot_rows.loc[lot_rows.loc[valid_dates, 'LAST_WAFER_END_DATE'].idxmax()]
+                end_start = pd.to_datetime(row['LAST_WAFER_END_DATE'])
+                end_end = most_recent_row['LAST_WAFER_END_DATE']
+                delay = round((end_end - end_start).total_seconds() / 3600, 1)
+                entity = most_recent_row['ENTITY']
+                qty_start = row['QTY']
+                qty_end = most_recent_row['QTY']
+                split = 'YES' if qty_start != qty_end else 'NO'
+            else:
+                delay = None
+                entity = None
+                split = 'NO'
         else:
             delay = None
             entity = None
@@ -96,6 +113,26 @@ app.layout = html.Div([
     ),
     html.Button('Reset Dates', id='reset-dates-btn', n_clicks=0),
     html.Div([
+        html.Label('LOT7?'),
+        dcc.RadioItems(
+            id='lot7-radio',
+            options=[
+                {'label': 'Use LOT', 'value': 'LOT'},
+                {'label': 'Use LOT7', 'value': 'LOT7'}
+            ],
+            value='LOT',
+            labelStyle={'display': 'inline-block', 'marginRight': '10px'}
+        ),
+        html.Label('LOT_TYPE:'),
+        dcc.Dropdown(
+            id='lot-type-dropdown',
+            options=[{'label': 'All', 'value': 'All'}] + [{'label': str(lot_type), 'value': lot_type} for lot_type in sorted(df['LOT_TYPE'].dropna().unique())],
+            value='All',
+            clearable=False,
+            style={'width': '200px'},
+            placeholder='Select LOT_TYPE'
+        ),
+    # PRODUCT_DESCRIPTION filter removed
         html.Label('Start OPN:'),
         dcc.Dropdown(
             id='start-opn-dropdown',
@@ -133,7 +170,9 @@ app.layout = html.Div([
     html.H2('Summary Statistics by ENTITY'),
     html.Div(id='summary-table'),
     html.H2('LOT Count by ENTITY and Month'),
-    dcc.Graph(id='lot-entity-month-plot')
+    dcc.Graph(id='lot-entity-month-plot'),
+    html.H2('Wafer Bow Analysis'),
+    html.Div(id='bow-charts-container')
 ])
 
 from dash.dependencies import Output, Input, State
@@ -154,76 +193,142 @@ def reset_dates(n_clicks, start_date, end_date):
     State('lot-dropdown', 'value'),
     State('date-picker-range', 'start_date'),
     State('date-picker-range', 'end_date'),
+    State('lot7-radio', 'value'),
     prevent_initial_call=True
 )
-def export_to_excel(n_clicks, selected_lot, start_date, end_date):
+def export_to_excel(n_clicks, selected_lot, start_date, end_date, lot_col):
     if n_clicks:
         filtered_df = df_delay_unique.copy()
         if start_date and end_date:
             filtered_df = filtered_df[(pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.date >= pd.to_datetime(start_date).date()) &
                                       (pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.date <= pd.to_datetime(end_date).date())]
         if selected_lot:
-            filtered_df = filtered_df[filtered_df['LOT'] == selected_lot]
-        return dcc.send_data_frame(filtered_df.to_excel, 'filtered_data.xlsx', index=False)
+            filtered_df = filtered_df[filtered_df[lot_col] == selected_lot]
+        # Wafer bow data for matching LOTs only
+        lots_bow = filtered_df['LOT'].unique()
+        bow_df_export = df_bow[df_bow['LOT'].isin(lots_bow)].copy()
+        bow_df_export = pd.merge(bow_df_export, filtered_df[['LOT', 'DELAY_TIME']], on='LOT', how='left')
+        # Export both sheets
+        import io
+        with pd.ExcelWriter(io.BytesIO(), engine='xlsxwriter') as writer:
+            filtered_df.to_excel(writer, sheet_name='Main', index=False)
+            bow_df_export.to_excel(writer, sheet_name='WaferBow', index=False)
+            writer.save()
+            writer.seek(0)
+            return dcc.send_bytes(writer.handle.getvalue(), 'filtered_data_with_bow.xlsx')
+    return None
+    # ...removed old export_df merge and return...
     return None
 
 @app.callback(
-        [Output('scatter-plot', 'figure'), Output('summary-table', 'children'), Output('lot-entity-month-plot', 'figure'), Output('lot-dropdown', 'options')],
-        [Input('start-opn-dropdown', 'value'),
-         Input('end-opn-dropdown', 'value'),
-         Input('entity-opn-dropdown', 'value'),
-         Input('lot-dropdown', 'value'),
-         Input('date-picker-range', 'start_date'),
-         Input('date-picker-range', 'end_date')]
+    [Output('scatter-plot', 'figure'), Output('summary-table', 'children'), Output('lot-entity-month-plot', 'figure'), Output('lot-dropdown', 'options'),
+     Output('bow-charts-container', 'children')],
+    [Input('start-opn-dropdown', 'value'),
+     Input('end-opn-dropdown', 'value'),
+     Input('entity-opn-dropdown', 'value'),
+     Input('lot7-radio', 'value'),
+     Input('lot-type-dropdown', 'value'),
+    # PRODUCT_DESCRIPTION filter removed
+     Input('lot-dropdown', 'value'),
+     Input('date-picker-range', 'start_date'),
+     Input('date-picker-range', 'end_date')]
 )
-def update_figure(start_opn, end_opn, entity_opn, selected_lot, start_date, end_date):
+def update_figure(start_opn, end_opn, entity_opn, lot_col, selected_lot_type, selected_lot, start_date, end_date):
     import numpy as np
-    df_delay = calculate_delay_time(start_opn, end_opn)
-    df_delay_unique = df_delay.sort_values('LAST_WAFER_END_DATE').dropna(subset=['DELAY_TIME']).drop_duplicates(subset=['LOT'], keep='last')
+    df_delay = calculate_delay_time(start_opn, end_opn, lot_col=lot_col)
+    df_delay_unique = df_delay.sort_values('LAST_WAFER_END_DATE').dropna(subset=['DELAY_TIME']).drop_duplicates(subset=[lot_col], keep='last')
     filtered_df = df_delay_unique.copy()
+    # Merge wafer bow data
+    # Ensure OPN is string for comparison
+    df_bow_merged = pd.merge(filtered_df, df_bow, on='LOT', how='left')
+    # Use correct ENTITY column for filtering (ENTITY_END_OPN from delay calculation)
+    # Wafer bow data: match to filtered_df LOTs only
+    lots_bow = filtered_df['LOT'].unique()
+    bow_df = df_bow[df_bow['LOT'].isin(lots_bow)].copy()
+    # Add DELAY_TIME to bow_df by merging with filtered_df
+    # Add DELAY_TIME and Fab Defect Scans to bow_df by merging with filtered_df
+    bow_df = pd.merge(bow_df, filtered_df[['LOT', 'DELAY_TIME', 'Fab Defect Scans']], on='LOT', how='left')
+    # Create separate chart for each CHART_TEST_NAME and CHART_TYPE
+    bow_charts = []
+    color_map_bow = {'Clean': 'green', 'Defects': 'red'}
+    # Map ENTITY from selected ENTITY OPN to bow_df
+    entity_df = opn_dfs[entity_opn]
+    entity_df['LAST_WAFER_END_DATE'] = pd.to_datetime(entity_df['LAST_WAFER_END_DATE'])
+    entity_df = entity_df.sort_values('LAST_WAFER_END_DATE').drop_duplicates(subset=[lot_col], keep='last')
+    entity_map = dict(zip(entity_df[lot_col], entity_df['ENTITY']))
+    bow_df['ENTITY_FOR_BOW'] = bow_df['LOT'].map(entity_map)
+    for (test_name, chart_type), group in bow_df.groupby(['CHART_TEST_NAME', 'CHART_TYPE']):
+        if group.empty:
+            continue
+        fig_bow = px.scatter(
+            group,
+            x='DELAY_TIME',
+            y='CHART_VALUE',
+            color='Fab Defect Scans',
+            symbol='Fab Defect Scans',
+            color_discrete_map={'Clean': 'green', 'Defects': 'red'},
+            title=f'Wafer Bow: {test_name} / {chart_type} (Grouped by ENTITY)',
+            hover_data=['LOT', 'CHART_TEST_NAME', 'CHART_TYPE', 'CHART_VALUE', 'DELAY_TIME', 'ENTITY_FOR_BOW', 'Fab Defect Scans']
+        )
+        bow_charts.append(html.Div([
+            html.H4(f'{test_name} / {chart_type}'),
+            dcc.Graph(figure=fig_bow)
+        ], style={'marginBottom': '40px'}))
+    # Filter by LOT_TYPE if not 'All'
+    if selected_lot_type and selected_lot_type != 'All':
+        filtered_df = filtered_df[filtered_df['LOT_TYPE'] == selected_lot_type]
+    # PRODUCT_DESCRIPTION filter removed
     # Use ENTITY values from selected ENTITY_OPN
     entity_df = opn_dfs[entity_opn]
-    entity_map = dict(zip(entity_df['LOT'], entity_df['ENTITY']))
-    filtered_df['ENTITY_FOR_PLOT'] = filtered_df['LOT'].map(entity_map)
+    # For each LOT, use the most recent LAST_WAFER_END_DATE
+    if 'LAST_WAFER_END_DATE' in entity_df.columns:
+        entity_df['LAST_WAFER_END_DATE'] = pd.to_datetime(entity_df['LAST_WAFER_END_DATE'])
+        entity_df = entity_df.sort_values('LAST_WAFER_END_DATE').drop_duplicates(subset=[lot_col], keep='last')
+    entity_map = dict(zip(entity_df[lot_col], entity_df['ENTITY']))
+    filtered_df['ENTITY_FOR_PLOT'] = filtered_df[lot_col].map(entity_map)
     # Prepare Year-Month column
     filtered_df['YEAR_MONTH'] = pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.to_period('M').astype(str)
-    lot_month_counts = filtered_df.groupby(['YEAR_MONTH', 'ENTITY_FOR_PLOT'])['LOT'].count().reset_index().rename(columns={'ENTITY_FOR_PLOT': 'ENTITY'})
+    lot_month_counts = filtered_df.groupby(['YEAR_MONTH', 'ENTITY_FOR_PLOT'])[lot_col].count().reset_index().rename(columns={'ENTITY_FOR_PLOT': 'ENTITY', lot_col: 'LOT_COUNT'})
     month_plot = px.bar(
         lot_month_counts,
         x='YEAR_MONTH',
-        y='LOT',
+        y='LOT_COUNT',
         color='ENTITY',
         barmode='group',
-        title='LOT Count by ENTITY and Month',
-        labels={'LOT': 'LOT Count', 'YEAR_MONTH': 'Year-Month'}
+        title=f'{lot_col} Count by ENTITY and Month',
+        labels={'LOT_COUNT': f'{lot_col} Count', 'YEAR_MONTH': 'Year-Month'}
     )
     month_plot.update_xaxes(tickangle=90)
     # Filter by date range
     if start_date and end_date:
         filtered_df = filtered_df[(pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.date >= pd.to_datetime(start_date).date()) &
                                   (pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.date <= pd.to_datetime(end_date).date())]
-    # Filter by LOT
+    # Filter by LOT/LOT7
     if selected_lot:
-        filtered_df = filtered_df[filtered_df['LOT'] == selected_lot]
-    lot_options = [{'label': str(lot), 'value': lot} for lot in filtered_df['LOT'].unique()]
+        filtered_df = filtered_df[filtered_df[lot_col] == selected_lot]
+    lot_options = [{'label': str(lot), 'value': lot} for lot in filtered_df[lot_col].unique()]
     jitter_strength = 0.05
+    y_col = 'ENTITY_FOR_PLOT'
     if not filtered_df.empty:
-        filtered_df['ENTITY_JITTER'] = filtered_df['ENTITY_FOR_PLOT']
-        if np.issubdtype(filtered_df['ENTITY_FOR_PLOT'].dtype, np.number):
-            filtered_df['ENTITY_JITTER'] += np.random.uniform(-jitter_strength, jitter_strength, size=len(filtered_df))
-        else:
-            entity_unique = [str(v) for v in filtered_df['ENTITY_FOR_PLOT'].unique()]
-            entity_plot_map = {v: i for i, v in enumerate(sorted(entity_unique))}
-            filtered_df['ENTITY_NUM'] = filtered_df['ENTITY_FOR_PLOT'].astype(str).map(entity_plot_map)
-            filtered_df['ENTITY_JITTER'] = filtered_df['ENTITY_NUM'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(filtered_df))
+        try:
+            if np.issubdtype(filtered_df['ENTITY_FOR_PLOT'].dtype, np.number):
+                filtered_df['ENTITY_JITTER'] = filtered_df['ENTITY_FOR_PLOT'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(filtered_df))
+            else:
+                entity_unique = [str(v) for v in filtered_df['ENTITY_FOR_PLOT'].unique()]
+                entity_plot_map = {v: i for i, v in enumerate(sorted(entity_unique))}
+                filtered_df['ENTITY_NUM'] = filtered_df['ENTITY_FOR_PLOT'].astype(str).map(entity_plot_map)
+                filtered_df['ENTITY_JITTER'] = filtered_df['ENTITY_NUM'] + np.random.uniform(-jitter_strength, jitter_strength, size=len(filtered_df))
+            y_col = 'ENTITY_JITTER'
+        except Exception:
+            y_col = 'ENTITY_FOR_PLOT'
     fig = px.scatter(
         filtered_df,
         x='DELAY_TIME',
-        y='ENTITY_JITTER',
+        y=y_col,
         color='Fab Defect Scans',
         color_discrete_map={'Clean': 'green', 'Defects': 'red'},  # custom color mapping
-        title='DELAY_TIME vs ENTITY Scatter (Y Jittered)',
-        hover_data=['LOT', 'MULTI', 'SPLIT', 'LOT_ABORT_FLAG', 'QTY', 'DOTPROCESS', 'PRODUCT', 'LAST_WAFER_END_DATE', 'ENTITY_FOR_PLOT'] + [col for col in lot_good_bad.columns if col != 'LOT']
+        title=f'DELAY_TIME vs ENTITY Scatter (Y Jittered) [{lot_col}]',
+        hover_data=[lot_col, 'MULTI', 'SPLIT', 'LOT_ABORT_FLAG', 'QTY', 'DOTPROCESS', 'PRODUCT', 'LAST_WAFER_END_DATE', 'ENTITY_FOR_PLOT'] + [col for col in lot_good_bad.columns if col != 'LOT']
     )
     fig.update_xaxes(title_text='DELAY_TIME (hours)')
     if not filtered_df.empty and not np.issubdtype(filtered_df['ENTITY_FOR_PLOT'].dtype, np.number):
@@ -258,7 +363,7 @@ def update_figure(start_opn, end_opn, entity_opn, selected_lot, start_date, end_
         summary_table = html.Table(table_header + table_rows, style={'width': '100%', 'borderCollapse': 'collapse', 'border': '1px solid black'})
     else:
         summary_table = html.Div('No data for selected filters.')
-    return (fig, summary_table, month_plot, lot_options)
+    return (fig, summary_table, month_plot, lot_options, bow_charts)
 
 if __name__ == '__main__':
     app.run(debug=True)
