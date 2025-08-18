@@ -16,12 +16,7 @@ F_WaferChamberHist wch
 ON leh.runkey = wch.runkey
 INNER JOIN F_Lot_Wafer_Recipe lwr2 ON lwr2.recipe_id=leh.lot_recipe_id
 WHERE
-              (wch.chamber LIKE  '%ADH%'
-OR wch.chamber LIKE '%PHP%'
-OR wch.chamber LIKE '%CPHG%'
-OR wch.chamber LIKE '%RGCH%'
-OR wch.chamber LIKE '%CGCH%'
-OR wch.chamber LIKE '%COT%'
+              (wch.chamber LIKE '%CGCH%'
 OR wch.chamber LIKE '%PC%')  
  AND      (leh.entity Like '%SDJ591%' OR leh.entity Like 'OXS%')
  AND (leh.OPERATION LIKE '194997' or leh.OPERATION LIKE '197573')

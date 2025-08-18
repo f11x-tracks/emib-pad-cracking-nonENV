@@ -7,8 +7,6 @@ from dash import dcc, html
 import plotly.express as px
 import dash_table
 from dash.dependencies import Output, Input
-import io
-import base64
 import numpy as np
 
 # Read data
@@ -61,7 +59,9 @@ def calculate_delay_time(df):
 
 
 plot_df = calculate_delay_time(delay_df)
-plot_df = plot_df.dropna(subset=['GVB'])
+# Assign 'NA' to WAFER_IDs without GVB match
+if 'GVB' in plot_df.columns:
+	plot_df['GVB'] = plot_df['GVB'].fillna('NA')
 
 # Jitter the y-axis (OPN_194997_CHAMBER) but keep chamber names on axis
 if 'OPN_194997_CHAMBER' in plot_df.columns:
@@ -87,6 +87,16 @@ fig.update_yaxes(
 
 app.layout = html.Div([
 	html.H2('Wafer Delay Time vs GVB'),
+	html.Label('Include NA (no GVB match) wafers:'),
+	dcc.RadioItems(
+		id='include-na-radio',
+		options=[
+			{'label': 'Include NA', 'value': 'include'},
+			{'label': 'Exclude NA', 'value': 'exclude'}
+		],
+		value='exclude',
+		inline=True
+	),
 	dcc.Graph(
 		id='delay-gvb-scatter',
 		figure=fig
