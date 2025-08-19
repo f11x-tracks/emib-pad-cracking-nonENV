@@ -2,6 +2,7 @@ import pandas as pd
 import dash
 from dash import dcc, html
 import plotly.express as px
+from dash.dependencies import Output, Input, State
 
 # Read CSV
 df = pd.read_csv('data.csv')
@@ -132,7 +133,6 @@ app.layout = html.Div([
             style={'width': '200px'},
             placeholder='Select LOT_TYPE'
         ),
-    # PRODUCT_DESCRIPTION filter removed
         html.Label('Start OPN:'),
         dcc.Dropdown(
             id='start-opn-dropdown',
@@ -157,6 +157,16 @@ app.layout = html.Div([
             clearable=False,
             style={'width': '340px'}
         ),
+        html.Label('Include NA (no Fab Defect Scans match):'),
+        dcc.RadioItems(
+            id='include-na-radio',
+            options=[
+                {'label': 'Include NA', 'value': 'include'},
+                {'label': 'Exclude NA', 'value': 'exclude'}
+            ],
+            value='exclude',
+            labelStyle={'display': 'inline-block', 'marginRight': '10px'}
+        ),
     ], style={'display': 'flex', 'gap': '20px', 'alignItems': 'center'}),
     dcc.Dropdown(
         id='lot-dropdown',
@@ -174,8 +184,6 @@ app.layout = html.Div([
     html.H2('Wafer Bow Analysis'),
     html.Div(id='bow-charts-container')
 ])
-
-from dash.dependencies import Output, Input, State
 
 @app.callback(
     [Output('date-picker-range', 'start_date'), Output('date-picker-range', 'end_date')],
@@ -228,16 +236,22 @@ def export_to_excel(n_clicks, selected_lot, start_date, end_date, lot_col):
      Input('entity-opn-dropdown', 'value'),
      Input('lot7-radio', 'value'),
      Input('lot-type-dropdown', 'value'),
-    # PRODUCT_DESCRIPTION filter removed
      Input('lot-dropdown', 'value'),
      Input('date-picker-range', 'start_date'),
-     Input('date-picker-range', 'end_date')]
+     Input('date-picker-range', 'end_date'),
+     Input('include-na-radio', 'value')]
 )
-def update_figure(start_opn, end_opn, entity_opn, lot_col, selected_lot_type, selected_lot, start_date, end_date):
+def update_figure(start_opn, end_opn, entity_opn, lot_col, selected_lot_type, selected_lot, start_date, end_date, include_na):
     import numpy as np
     df_delay = calculate_delay_time(start_opn, end_opn, lot_col=lot_col)
     df_delay_unique = df_delay.sort_values('LAST_WAFER_END_DATE').dropna(subset=['DELAY_TIME']).drop_duplicates(subset=[lot_col], keep='last')
+    # Assign NA to missing Fab Defect Scans
+    if 'Fab Defect Scans' in df_delay_unique.columns:
+        df_delay_unique['Fab Defect Scans'] = df_delay_unique['Fab Defect Scans'].fillna('NA')
     filtered_df = df_delay_unique.copy()
+    # Filter NA if requested
+    if include_na == 'exclude' and 'Fab Defect Scans' in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df['Fab Defect Scans'] != 'NA']
     # Merge wafer bow data
     # Ensure OPN is string for comparison
     df_bow_merged = pd.merge(filtered_df, df_bow, on='LOT', how='left')
