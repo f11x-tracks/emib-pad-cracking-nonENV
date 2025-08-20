@@ -198,18 +198,49 @@ def reset_dates(n_clicks, start_date, end_date):
 @app.callback(
     Output('download-dataframe-xlsx', 'data'),
     Input('export-excel-btn', 'n_clicks'),
+    State('start-opn-dropdown', 'value'),
+    State('end-opn-dropdown', 'value'),
+    State('entity-opn-dropdown', 'value'),
+    State('lot7-radio', 'value'),
+    State('lot-type-dropdown', 'value'),
     State('lot-dropdown', 'value'),
     State('date-picker-range', 'start_date'),
     State('date-picker-range', 'end_date'),
-    State('lot7-radio', 'value'),
+    State('include-na-radio', 'value'),
     prevent_initial_call=True
 )
-def export_to_excel(n_clicks, selected_lot, start_date, end_date, lot_col):
+def export_to_excel(n_clicks, start_opn, end_opn, entity_opn, lot_col, selected_lot_type, selected_lot, start_date, end_date, include_na):
     if n_clicks:
-        filtered_df = df_delay_unique.copy()
+        # Recalculate with current filter settings
+        df_delay = calculate_delay_time(start_opn, end_opn, lot_col=lot_col)
+        filtered_df = df_delay.sort_values('LAST_WAFER_END_DATE').dropna(subset=['DELAY_TIME']).drop_duplicates(subset=[lot_col], keep='last')
+        
+        # Assign NA to missing Fab Defect Scans
+        if 'Fab Defect Scans' in filtered_df.columns:
+            filtered_df['Fab Defect Scans'] = filtered_df['Fab Defect Scans'].fillna('NA')
+        
+        # Filter NA if requested
+        if include_na == 'exclude' and 'Fab Defect Scans' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['Fab Defect Scans'] != 'NA']
+        
+        # Filter by LOT_TYPE if not 'All'
+        if selected_lot_type and selected_lot_type != 'All':
+            filtered_df = filtered_df[filtered_df['LOT_TYPE'] == selected_lot_type]
+        
+        # Use ENTITY values from selected ENTITY_OPN
+        entity_df = opn_dfs[entity_opn]
+        if 'LAST_WAFER_END_DATE' in entity_df.columns:
+            entity_df['LAST_WAFER_END_DATE'] = pd.to_datetime(entity_df['LAST_WAFER_END_DATE'])
+            entity_df = entity_df.sort_values('LAST_WAFER_END_DATE').drop_duplicates(subset=[lot_col], keep='last')
+        entity_map = dict(zip(entity_df[lot_col], entity_df['ENTITY']))
+        filtered_df['ENTITY_FOR_PLOT'] = filtered_df[lot_col].map(entity_map)
+        
+        # Filter by date range
         if start_date and end_date:
             filtered_df = filtered_df[(pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.date >= pd.to_datetime(start_date).date()) &
                                       (pd.to_datetime(filtered_df['LAST_WAFER_END_DATE']).dt.date <= pd.to_datetime(end_date).date())]
+        
+        # Filter by LOT/LOT7
         if selected_lot:
             filtered_df = filtered_df[filtered_df[lot_col] == selected_lot]
         # Wafer bow data for matching LOTs only
@@ -218,12 +249,12 @@ def export_to_excel(n_clicks, selected_lot, start_date, end_date, lot_col):
         bow_df_export = pd.merge(bow_df_export, filtered_df[['LOT', 'DELAY_TIME']], on='LOT', how='left')
         # Export both sheets
         import io
-        with pd.ExcelWriter(io.BytesIO(), engine='xlsxwriter') as writer:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             filtered_df.to_excel(writer, sheet_name='Main', index=False)
             bow_df_export.to_excel(writer, sheet_name='WaferBow', index=False)
-            writer.save()
-            writer.seek(0)
-            return dcc.send_bytes(writer.handle.getvalue(), 'filtered_data_with_bow.xlsx')
+        buffer.seek(0)
+        return dcc.send_bytes(buffer.getvalue(), 'filtered_data_with_bow.xlsx')
     return None
     # ...removed old export_df merge and return...
     return None
